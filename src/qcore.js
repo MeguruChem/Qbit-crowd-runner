@@ -1,5 +1,6 @@
 // qcore.js — 量子ビット群衆のコア計算（ブラウザ / Node 共通）
-// 一人ひとりが純粋状態スピノル (a, b) を持ち、群衆平均が密度行列 ρ を与える。
+// 一人ひとりがブロッホベクトル r_i（|r_i| ≤ 1）を持ち、群衆平均が密度行列 ρ = (I + r·σ)/2 を与える。
+// 1 次元章では r_i = (0, 0, z)（確率ビット）、2 次元章では r_i = (x, 0, z)（XZ 面）に留まるゲートだけを使う。
 (function (root) {
   'use strict';
 
@@ -22,144 +23,109 @@
     return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
   }
 
-  // ---- 複素数 [re, im] ----
-  const cmul = (x, y) => [x[0] * y[0] - x[1] * y[1], x[0] * y[1] + x[1] * y[0]];
-  const cadd = (x, y) => [x[0] + y[0], x[1] + y[1]];
-
-  // 軸 n まわりの角度 θ の回転 U = cos(θ/2) I − i sin(θ/2) n·σ
-  function rot(n, theta) {
+  // ---- 回転（ロドリゲスの公式） ----
+  function rotate(v, n, th) {
     const len = Math.hypot(n[0], n[1], n[2]);
-    const nx = n[0] / len, ny = n[1] / len, nz = n[2] / len;
-    const c = Math.cos(theta / 2), s = Math.sin(theta / 2);
-    return [
-      [[c, -s * nz], [-s * ny, -s * nx]],
-      [[s * ny, -s * nx], [c, s * nz]],
-    ];
+    const k = [n[0] / len, n[1] / len, n[2] / len];
+    const c = Math.cos(th), s = Math.sin(th);
+    const dot = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    const cr = [k[1] * v[2] - k[2] * v[1], k[2] * v[0] - k[0] * v[2], k[0] * v[1] - k[1] * v[0]];
+    return [0, 1, 2].map((i) => v[i] * c + cr[i] * s + k[i] * dot * (1 - c));
   }
-  const SQ = Math.SQRT1_2;
-  const PI = Math.PI;
+  const SQ = Math.SQRT1_2, PI = Math.PI;
+  // 軸 n まわりに角度 θ（右ねじ）。XZ 面を正面から見ると Ry(+θ) は時計回り。
   const GATES = {
-    X: { label: 'X', U: rot([1, 0, 0], PI) },
-    Y: { label: 'Y', U: rot([0, 1, 0], PI) },
-    Z: { label: 'Z', U: rot([0, 0, 1], PI) },
-    H: { label: 'H', U: rot([SQ, 0, SQ], PI) },
-    S: { label: 'S', U: rot([0, 0, 1], PI / 2) },
-    Sdg: { label: 'S†', U: rot([0, 0, 1], -PI / 2) },
-    T: { label: 'T', U: rot([0, 0, 1], PI / 4) },
-    Tdg: { label: 'T†', U: rot([0, 0, 1], -PI / 4) },
-    Rx90: { label: 'Rx 90°', U: rot([1, 0, 0], PI / 2) },
-    Rxm90: { label: 'Rx −90°', U: rot([1, 0, 0], -PI / 2) },
-    Ry90: { label: 'Ry 90°', U: rot([0, 1, 0], PI / 2) },
-    Rym90: { label: 'Ry −90°', U: rot([0, 1, 0], -PI / 2) },
-    I: { label: '素通り', U: null },
+    I: { label: '素通り' },
+    X: { label: 'X', axis: [1, 0, 0], angle: PI },
+    Y: { label: 'Y', axis: [0, 1, 0], angle: PI },
+    Z: { label: 'Z', axis: [0, 0, 1], angle: PI },
+    H: { label: 'H', axis: [SQ, 0, SQ], angle: PI },
+    Ry90: { label: 'Ry 90°', axis: [0, 1, 0], angle: PI / 2 },
+    Rym90: { label: 'Ry −90°', axis: [0, 1, 0], angle: -PI / 2 },
+    Ry45: { label: 'Ry 45°', axis: [0, 1, 0], angle: PI / 4 },
+    Rym45: { label: 'Ry −45°', axis: [0, 1, 0], angle: -PI / 4 },
+    S: { label: 'S', axis: [0, 0, 1], angle: PI / 2 },
+    Sdg: { label: 'S†', axis: [0, 0, 1], angle: -PI / 2 },
+    T: { label: 'T', axis: [0, 0, 1], angle: PI / 4 },
+    Rx90: { label: 'Rx 90°', axis: [1, 0, 0], angle: PI / 2 },
     M: { label: '観測', special: 'measureZ' },
-    COOL: { label: '冷却', special: 'cool' },
   };
 
-  // ---- 個人 ----
-  function makePerson(w) {
-    // w: 歳差速度のばらつき係数（人ごとに固定、標準正規）
-    return { a: [1, 0], b: [0, 0], w: w };
-  }
-  function makeCrowd(N) {
+  // ---- 群衆 ----
+  function makeCrowd(N, start) {
     const crowd = [];
-    for (let i = 0; i < N; i++) crowd.push(makePerson(gauss()));
+    for (let i = 0; i < N; i++) {
+      let r = [0, 0, 1];
+      if (start === 'one') r = [0, 0, -1];
+      else if (start === 'mixed') r = [0, 0, 2 * rand() - 1];
+      // w: 歳差速度のばらつき（人ごとに固定）、j: 1 次元表示での横ゆらし
+      crowd.push({ r, w: gauss(), j: 2 * rand() - 1 });
+    }
     return crowd;
   }
-  function applyU(p, U) {
-    const a = cadd(cmul(U[0][0], p.a), cmul(U[0][1], p.b));
-    const b = cadd(cmul(U[1][0], p.a), cmul(U[1][1], p.b));
-    p.a = a; p.b = b;
-  }
-  function normalize(p) {
-    const n = Math.sqrt(p.a[0] ** 2 + p.a[1] ** 2 + p.b[0] ** 2 + p.b[1] ** 2);
-    p.a = [p.a[0] / n, p.a[1] / n]; p.b = [p.b[0] / n, p.b[1] / n];
-  }
-  function bloch(p) {
-    // a* b
-    const re = p.a[0] * p.b[0] + p.a[1] * p.b[1];
-    const im = p.a[0] * p.b[1] - p.a[1] * p.b[0];
-    const pa = p.a[0] ** 2 + p.a[1] ** 2, pb = p.b[0] ** 2 + p.b[1] ** 2;
-    return [2 * re, 2 * im, pa - pb];
-  }
-  function setFromBloch(p, v) {
-    const th = Math.acos(Math.max(-1, Math.min(1, v[2])));
-    const ph = Math.atan2(v[1], v[0]);
-    p.a = [Math.cos(th / 2), 0];
-    p.b = [Math.sin(th / 2) * Math.cos(ph), Math.sin(th / 2) * Math.sin(ph)];
-  }
+  const bloch = (p) => p.r.slice();
   function meanBloch(crowd) {
-    const r = [0, 0, 0];
-    for (const p of crowd) { const v = bloch(p); r[0] += v[0]; r[1] += v[1]; r[2] += v[2]; }
-    return r.map((x) => x / crowd.length);
+    const m = [0, 0, 0];
+    for (const p of crowd) { m[0] += p.r[0]; m[1] += p.r[1]; m[2] += p.r[2]; }
+    return m.map((x) => x / crowd.length);
   }
 
   // ---- ゲート ----
+  function measureZ(p) { p.r = [0, 0, rand() < (1 + p.r[2]) / 2 ? 1 : -1]; }
   function applyGate(crowd, key) {
     const g = GATES[key];
     if (!g) throw new Error('unknown gate ' + key);
-    if (g.special === 'measureZ') { for (const p of crowd) measureZ(p); return; }
-    if (g.special === 'cool') { for (const p of crowd) if (rand() < 0.5) setFromBloch(p, [0, 0, 1]); return; }
-    if (!g.U) return;
-    for (const p of crowd) applyU(p, g.U);
+    if (g.special === 'measureZ') { crowd.forEach(measureZ); return; }
+    if (!g.axis) return;
+    for (const p of crowd) p.r = rotate(p.r, g.axis, g.angle);
   }
 
   // ---- ゾーン（距離 ds あたり） ----
-  // precess: angle = 総回転角 × (ds/L) × (1 + spread·w)
-  function precess(crowd, anglePerUnit, spread, ds) {
-    for (const p of crowd) applyU(p, rot([0, 0, 1], anglePerUnit * ds * (1 + spread * p.w)));
-  }
-  // dephase: ランダム Rz キック。⟨e^{-iφ}⟩ = e^{-γ ds}
-  function dephase(crowd, gamma, ds) {
-    const sd = Math.sqrt(2 * gamma * ds);
-    for (const p of crowd) applyU(p, rot([0, 0, 1], sd * gauss()));
-  }
-  // damp: 量子ジャンプ法による振幅減衰（|1⟩ → |0⟩）
-  function damp(crowd, gamma, ds) {
-    for (const p of crowd) {
-      const p1 = p.b[0] ** 2 + p.b[1] ** 2;
-      if (rand() < gamma * p1 * ds) { p.a = [1, 0]; p.b = [0, 0]; }
-      else { const f = Math.exp(-gamma * ds / 2); p.b = [p.b[0] * f, p.b[1] * f]; normalize(p); }
-    }
-  }
-  function measureZ(p) {
-    const p0 = p.a[0] ** 2 + p.a[1] ** 2;
-    if (rand() < p0) { p.a = [1, 0]; p.b = [0, 0]; } else { p.a = [0, 0]; p.b = [1, 0]; }
-  }
-  function applyZone(crowd, zone, ds) {
+  function applyZone(crowd, zone, ds, dim) {
     const L = zone.to - zone.from;
-    if (zone.kind === 'precess') precess(crowd, zone.angle / L, zone.spread || 0, ds);
-    else if (zone.kind === 'dephase') dephase(crowd, zone.gamma, ds);
-    else if (zone.kind === 'damp') damp(crowd, zone.gamma, ds);
+    for (const p of crowd) {
+      const r = p.r;
+      if (zone.kind === 'precess') {
+        p.r = rotate(r, [0, 0, 1], (zone.angle / L) * ds * (1 + (zone.spread || 0) * p.w));
+      } else if (zone.kind === 'dephase') {
+        if (dim === 3) {
+          // 3 次元：ランダムな z 軸まわりのキック（量子軌道法）。平均の横成分は e^{-γs} で減衰
+          p.r = rotate(r, [0, 0, 1], Math.sqrt(2 * zone.gamma * ds) * gauss());
+        } else {
+          // 2 次元：面から出ないよう、一人ずつ横成分を決定論的に縮める（数直線へ押しつぶされる）
+          const f = Math.exp(-zone.gamma * ds);
+          p.r = [r[0] * f, r[1] * f, r[2]];
+        }
+      } else if (zone.kind === 'damp') {
+        // 振幅減衰：z → 1 − (1 − z)e^{-γs}、横成分 × e^{-γs/2}
+        const f = Math.exp(-zone.gamma * ds), h = Math.exp(-zone.gamma * ds / 2);
+        p.r = [r[0] * h, r[1] * h, 1 - (1 - r[2]) * f];
+      } else if (zone.kind === 'bitflip') {
+        // ビット反転：確率 γ ds で X。平均の z は e^{-2γs} で減衰
+        if (rand() < zone.gamma * ds) p.r = rotate(r, [1, 0, 0], PI);
+      }
+    }
   }
 
   // ---- ボス：軸 n での射影測定 ----
+  function unit(n) { const l = Math.hypot(n[0], n[1], n[2]); return n.map((x) => x / l); }
   function measureAlong(crowd, n) {
-    const len = Math.hypot(n[0], n[1], n[2]);
-    const u = n.map((x) => x / len);
-    const outcomes = [];
-    for (const p of crowd) {
-      const v = bloch(p);
-      const prob = (1 + v[0] * u[0] + v[1] * u[1] + v[2] * u[2]) / 2;
-      outcomes.push(rand() < prob);
-    }
-    return outcomes;
+    const u = unit(n);
+    return crowd.map((p) => rand() < (1 + p.r[0] * u[0] + p.r[1] * u[1] + p.r[2] * u[2]) / 2);
   }
   function expectedHits(crowd, n) {
-    const r = meanBloch(crowd);
-    const len = Math.hypot(n[0], n[1], n[2]);
-    return crowd.length * (1 + (r[0] * n[0] + r[1] * n[1] + r[2] * n[2]) / len) / 2;
+    const r = meanBloch(crowd), u = unit(n);
+    return crowd.length * (1 + r[0] * u[0] + r[1] * u[1] + r[2] * u[2]) / 2;
   }
   function score(hits, rMean, n) {
-    const len = Math.hypot(n[0], n[1], n[2]);
-    const f = (1 + (rMean[0] * n[0] + rMean[1] * n[1] + rMean[2] * n[2]) / len) / 2;
+    const u = unit(n);
+    const f = (1 + rMean[0] * u[0] + rMean[1] * u[1] + rMean[2] * u[2]) / 2;
     return hits * 100 + Math.round(1000 * f);
   }
 
   const Q = {
-    setSeed, gauss, rot, GATES, makeCrowd, applyU, bloch, setFromBloch, meanBloch,
-    applyGate, applyZone, measureAlong, expectedHits, score,
-    rand: () => rand(),
+    setSeed, gauss, rotate, GATES, makeCrowd, bloch, meanBloch,
+    applyGate, applyZone, measureAlong, expectedHits, score, unit,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = Q;
   root.Q = Q;
