@@ -1,5 +1,5 @@
 // 全ステージについて、レーン選択の全組み合わせを総当たりし、
-// 期待攻撃人数 N(1+r·n)/2 を計算する。正解ルートが HP を超え、
+// 期待ダメージ Σ r_i·n（当たり − はずれ） を計算する。正解ルートが HP を超え、
 // 誤ルートの多くが HP 未満になることを確認する。
 // 使い方: node tests/check_levels.js
 const Q = require('../src/qcore.js');
@@ -30,7 +30,7 @@ function simulate(lv, choice, seed) {
       if (lv.dim === 2) maxOff = Math.max(maxOff, Math.abs(p.r[1]));
     }
   }
-  return { exp: Q.expectedHits(crowd, lv.boss.axis), r: Q.meanBloch(crowd), maxOff };
+  return { exp: Q.expectedDamage(crowd, lv.boss.axis), r: Q.meanBloch(crowd), maxOff };
 }
 
 let ok = true;

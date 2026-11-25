@@ -2,9 +2,10 @@
 (function () {
   'use strict';
   const { Q, LEVELS, CHAPTERS, gateDesc, zoneDesc } = window;
-  const N = 60;
+  const N0 = 60;            // 初期人数
   const SPEED = 7;          // 距離単位 / 秒
   const VIEW = 55;          // 前方の可視距離
+  const SKIP_COST = 150;    // スキップの値段（ケット）
   const cv = document.getElementById('game');
   const ctx = cv.getContext('2d');
   let W = 0, H = 0;
@@ -19,43 +20,67 @@
   }
   window.addEventListener('resize', resize);
 
+  // ---- スキン（群衆の見た目）：top = |0⟩ 側の色、bottom = |1⟩ 側の色 ----
+  const SKINS = [
+    { id: 'classic', name: 'クラシック', price: 0, top: [55, 138, 221], bottom: [226, 75, 74], shape: 'circle' },
+    { id: 'pastel', name: 'パステル', price: 100, top: [93, 202, 165], bottom: [237, 147, 177], shape: 'circle' },
+    { id: 'mono', name: 'モノクロ', price: 150, top: [245, 245, 245], bottom: [110, 110, 118], shape: 'square' },
+    { id: 'neon', name: 'ネオン', price: 200, top: [80, 230, 255], bottom: [255, 80, 220], shape: 'diamond' },
+    { id: 'gold', name: '金の星', price: 300, top: [250, 199, 117], bottom: [127, 119, 221], shape: 'star' },
+  ];
+
+  // ---- 保存データ ----
+  const SAVE_KEY = 'qcr_save_v3';
+  function load() {
+    const d = { cleared: [], ket: 0, owned: ['classic'], skin: 'classic', best: {} };
+    try { Object.assign(d, JSON.parse(localStorage.getItem(SAVE_KEY) || '{}')); } catch (e) { /* 初期値で続行 */ }
+    return d;
+  }
+  const SAVE = load();
+  function save() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); } catch (e) { /* 保存できなくても続行 */ } }
+  const skin = () => SKINS.find((s) => s.id === SAVE.skin) || SKINS[0];
+  const unlocked = (i) => i === 0 || SAVE.cleared.includes(i - 1) || SAVE.cleared.includes(i);
+
   // ---- 状態 ----
   const G = {
-    mode: 'title',          // title | intro | run | measure | result
+    mode: 'title',          // title | shop | intro | run | measure | result
     levelIdx: 0, level: null, crowd: null,
     s: 0, lane: -1, laneX: -1,
     gatesPassed: 0, flash: null, yaw: 0.6,
-    measureT: 0, outcomes: null, rBefore: null, hits: 0, result: null,
-    offsets: [], cleared: loadCleared(),
+    measureT: 0, outcomes: null, rBefore: null, dmg: 0, hits: 0, result: null, toast: null,
   };
-  function loadCleared() { try { return JSON.parse(localStorage.getItem('qcr_cleared_v2') || '[]'); } catch (e) { return []; } }
-  function saveCleared() { try { localStorage.setItem('qcr_cleared_v2', JSON.stringify(G.cleared)); } catch (e) { /* 保存できなくても続行 */ } }
 
   function prepareLevel(i) {
+    if (!unlocked(i)) return;
     G.levelIdx = i; G.level = LEVELS[i];
-    G.crowd = Q.makeCrowd(N, G.level.start);
+    G.crowd = Q.makeCrowd(N0, G.level.start);
     G.s = 0; G.lane = -1; G.laneX = -1; G.gatesPassed = 0; G.flash = null;
     G.outcomes = null; G.result = null; G.measureT = 0;
-    G.offsets = G.crowd.map((_, k) => [((k % 10) - 4.5) * 0.09 + (Math.random() - 0.5) * 0.04, Math.floor(k / 10) * 0.07 + Math.random() * 0.03]);
     G.mode = 'intro';
+  }
+  function skipLevel() {
+    if (SAVE.ket < SKIP_COST || SAVE.cleared.includes(G.levelIdx)) return;
+    SAVE.ket -= SKIP_COST; SAVE.cleared.push(G.levelIdx); save();
+    G.toast = { text: `${G.level.name.split(' ')[0]} をスキップしました`, t: 2 };
+    if (G.levelIdx < LEVELS.length - 1) prepareLevel(G.levelIdx + 1); else G.mode = 'title';
   }
 
   // このステージで初めて出てくる説明（次元で意味が変わるものは別扱い）
+  function collect(lv) {
+    const out = [], keys = new Set();
+    const add = (key, name, text) => { if (!keys.has(key) && text) { keys.add(key); out.push({ key, name, text }); } };
+    for (const g of lv.gates) for (const k of [g.left, g.right]) add(k + '@' + gateDesc(k, lv.dim), Q.GATES[k].label, gateDesc(k, lv.dim));
+    for (const z of lv.zones) add(z.kind + '@' + zoneDesc(z.kind, lv.dim), ZONE_NAME[z.kind], zoneDesc(z.kind, lv.dim));
+    return out;
+  }
   function newThings(idx) {
     const seen = new Set();
     for (let i = 0; i < idx; i++) collect(LEVELS[i]).forEach((d) => seen.add(d.key));
     return collect(LEVELS[idx]).filter((d) => !seen.has(d.key));
   }
-  function collect(lv) {
-    const out = [], keys = new Set();
-    const add = (key, name, text) => { if (!keys.has(key) && text) { keys.add(key); out.push({ key, name, text }); } };
-    for (const g of lv.gates) for (const k of [g.left, g.right]) add(k + '@' + gateDesc(k, lv.dim), Q.GATES[k].label, gateDesc(k, lv.dim));
-    const zn = { damp: '減衰', bitflip: 'ビット反転', dephase: '位相ノイズ', precess: '磁場' };
-    for (const z of lv.zones) add(z.kind + '@' + zoneDesc(z.kind, lv.dim), zn[z.kind], zoneDesc(z.kind, lv.dim));
-    return out;
-  }
 
   // ---- 入力 ----
+  let buttons = [];
   function setLane(d) { if (G.mode === 'run') G.lane = d; }
   window.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowLeft' || e.key === 'a') setLane(-1);
@@ -67,19 +92,20 @@
     const r = cv.getBoundingClientRect();
     const x = e.clientX - r.left, y = e.clientY - r.top;
     if (G.mode === 'run') { setLane(x < W / 2 ? -1 : 1); return; }
-    for (const b of buttons) if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
+    for (const b of buttons) if (b.fn && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
   });
+  function firstUncleared() { for (let i = 0; i < LEVELS.length; i++) if (!SAVE.cleared.includes(i)) return i; return 0; }
   function onConfirm() {
     if (G.mode === 'title') prepareLevel(firstUncleared());
     else if (G.mode === 'intro') G.mode = 'run';
     else if (G.mode === 'result') prepareLevel(G.result.win ? Math.min(LEVELS.length - 1, G.levelIdx + 1) : G.levelIdx);
   }
-  function firstUncleared() { for (let i = 0; i < LEVELS.length; i++) if (!G.cleared.includes(i)) return i; return 0; }
-  let buttons = [];
 
   // ---- 更新 ----
   function update(dt) {
     G.yaw += dt * 0.15;
+    if (G.toast) { G.toast.t -= dt; if (G.toast.t <= 0) G.toast = null; }
+    if (G.flash) { G.flash.t -= dt; if (G.flash.t <= 0) G.flash = null; }
     if (G.mode === 'run') {
       G.laneX += (G.lane - G.laneX) * Math.min(1, dt * 10);
       const lv = G.level;
@@ -97,17 +123,18 @@
       while (G.gatesPassed < lv.gates.length && lv.gates[G.gatesPassed].at <= s1) {
         const g = lv.gates[G.gatesPassed];
         const key = G.lane < 0 ? g.left : g.right;
+        const before = G.crowd.length;
         Q.applyGate(G.crowd, key);
-        G.flash = { label: Q.GATES[key].label, t: 0.8 };
+        const diff = G.crowd.length - before;
+        G.flash = { label: Q.GATES[key].label + (diff ? `  →  ${G.crowd.length}人` : ''), t: 0.9 };
         G.gatesPassed++;
       }
       G.s = s1;
       if (G.s >= lv.length) beginMeasure();
     } else if (G.mode === 'measure') {
       G.measureT += dt;
-      if (G.measureT > 2.2) finishMeasure();
+      if (G.measureT > 2.4) finishMeasure();
     }
-    if (G.flash) { G.flash.t -= dt; if (G.flash.t <= 0) G.flash = null; }
   }
   function beginMeasure() {
     const n = G.level.boss.axis;
@@ -115,19 +142,25 @@
     G.startVecs = G.crowd.map(Q.bloch);
     G.outcomes = Q.measureAlong(G.crowd, n);
     G.hits = G.outcomes.filter(Boolean).length;
+    G.dmg = Q.damage(G.outcomes);
     G.measureT = 0; G.mode = 'measure';
   }
   function finishMeasure() {
-    const lv = G.level;
-    const win = G.hits >= lv.boss.hp;
-    G.result = { win, score: Q.score(G.hits, G.rBefore, lv.boss.axis) };
-    if (win && !G.cleared.includes(G.levelIdx)) { G.cleared.push(G.levelIdx); saveCleared(); }
+    const lv = G.level, i = G.levelIdx;
+    const win = G.dmg >= lv.boss.hp;
+    const sc = Q.score(G.dmg, G.rBefore, lv.boss.axis);
+    const ket = Q.ketReward(G.dmg, lv.boss.hp);
+    const best = SAVE.best[i] || 0;
+    if (sc > best) SAVE.best[i] = sc;
+    SAVE.ket += ket;
+    if (win && !SAVE.cleared.includes(i)) SAVE.cleared.push(i);
+    save();
+    G.result = { win, score: sc, ket, newBest: sc > best };
     G.mode = 'result';
   }
 
-  // ---- 状態の表示（1D 数直線 / 2D 円 / 3D 球） ----
+  // ---- 状態の表示（1D 線 / 2D 円 / 3D 球） ----
   const PITCH = 0.38;
-  // 返り値 [screenX, screenY, depth]（depth ≥ 0 が手前）
   function proj(v, cx, cy, R, dim, jit) {
     if (dim === 1) return [cx + (jit || 0) * R * 0.42, cy - v[2] * R, 1];
     if (dim === 2) return [cx + v[0] * R, cy - v[2] * R, 1];
@@ -136,31 +169,44 @@
     const cp = Math.cos(PITCH), sp = Math.sin(PITCH);
     return [cx + x1 * R, cy - (y1 * sp + v[2] * cp) * R, -y1 * cp + v[2] * sp];
   }
-  function zColor(z, alpha) {
-    const t = (1 - z) / 2; // 0: |0⟩ 青, 1: |1⟩ 赤
-    const r = Math.round(55 + t * 171), g = Math.round(138 - t * 63), b = Math.round(221 - t * 147);
-    return `rgba(${r},${g},${b},${alpha})`;
+  function personColor(z, alpha, sk) {
+    const t = (1 - z) / 2;
+    const c = [0, 1, 2].map((k) => Math.round(sk.top[k] + t * (sk.bottom[k] - sk.top[k])));
+    return `rgba(${c[0]},${c[1]},${c[2]},${alpha})`;
+  }
+  function drawPerson(x, y, rad, z, alpha, sk) {
+    sk = sk || skin();
+    ctx.fillStyle = personColor(z, alpha, sk);
+    ctx.beginPath();
+    if (sk.shape === 'square') ctx.rect(x - rad, y - rad, rad * 2, rad * 2);
+    else if (sk.shape === 'diamond') { ctx.moveTo(x, y - rad * 1.3); ctx.lineTo(x + rad * 1.1, y); ctx.lineTo(x, y + rad * 1.3); ctx.lineTo(x - rad * 1.1, y); }
+    else if (sk.shape === 'star') {
+      for (let k = 0; k < 10; k++) {
+        const a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? rad * 0.6 : rad * 1.5;
+        ctx[k ? 'lineTo' : 'moveTo'](x + rr * Math.cos(a), y + rr * Math.sin(a));
+      }
+    } else ctx.arc(x, y, rad, 0, Math.PI * 2);
+    ctx.fill();
   }
   const GUIDE = 'rgba(160,160,170,0.55)', GUIDE_FAINT = 'rgba(160,160,170,0.2)';
   function line(x1, y1, x2, y2, col, w) { ctx.strokeStyle = col; ctx.lineWidth = w || 1; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
-  function label(text, x, y, alpha) {
+  function label(text, x, y, alpha, align) {
     ctx.fillStyle = `rgba(220,220,230,${alpha == null ? 0.9 : alpha})`;
-    ctx.font = font(12); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y);
+    ctx.font = font(12); ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, x, y);
   }
 
   function drawGuides(cx, cy, R, dim) {
     if (dim === 1) {
       line(cx, cy - R, cx, cy + R, GUIDE, 1.5);
-      for (const [z, t] of [[1, '+1  |0⟩'], [0, '0'], [-1, '−1  |1⟩']]) {
+      for (const [z, t] of [[1, '|0⟩'], [0, '半々'], [-1, '|1⟩']]) {
         line(cx - 8, cy - z * R, cx + 8, cy - z * R, GUIDE, 1.5);
-        ctx.fillStyle = 'rgba(220,220,230,0.9)'; ctx.font = font(12); ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillText(t, cx + R * 0.5, cy - z * R);
+        label(t, cx + R * 0.5, cy - z * R, 0.9, 'left');
       }
       return;
     }
     if (dim === 2) {
       ctx.strokeStyle = GUIDE; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.stroke();
-      line(cx, cy - R, cx, cy + R, 'rgba(160,160,170,0.35)', 1.5);   // 数直線（第1章の名残）
+      line(cx, cy - R, cx, cy + R, 'rgba(160,160,170,0.35)', 1.5);   // 第1章の縦の線
       line(cx - R, cy, cx + R, cy, GUIDE_FAINT, 1);
       label('|0⟩', cx, cy - R - 14); label('|1⟩', cx, cy + R + 14);
       label('|+⟩', cx + R + 18, cy); label('|−⟩', cx - R - 18, cy);
@@ -185,29 +231,23 @@
   }
 
   function drawState(cx, cy, R, vecs) {
-    const dim = G.level.dim;
+    const dim = G.level.dim, sk = skin();
     drawGuides(cx, cy, R, dim);
-    // ボスの的
     const n = Q.unit(G.level.boss.axis);
     const tp = proj(n, cx, cy, R, dim, 0);
     ctx.strokeStyle = 'rgba(239,159,39,0.95)'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(tp[0], tp[1], 11 + 2 * Math.sin(performance.now() / 200), 0, Math.PI * 2); ctx.stroke();
-    // 人（奥から描く）
-    // 同じ点に重なった人も群衆に見えるよう、2D/3D では数ピクセルだけ散らして描く
+    const rad = vecs.length > 200 ? 2.5 : vecs.length > 100 ? 3 : 4;
     const pts = vecs.map((v, i) => {
       const p = proj(v, cx, cy, R, dim, G.crowd[i].j);
       if (dim > 1) { p[0] += G.crowd[i].j * 6; p[1] += Math.max(-1, Math.min(1, G.crowd[i].w / 2)) * 6; }
       return [p, v];
     }).sort((a, b) => a[0][2] - b[0][2]);
-    for (const [p, v] of pts) {
-      const front = p[2] >= 0;
-      ctx.fillStyle = zColor(v[2], front ? 0.95 : 0.35);
-      ctx.beginPath(); ctx.arc(p[0], p[1], front ? 4 : 3, 0, Math.PI * 2); ctx.fill();
-    }
+    for (const [p, v] of pts) drawPerson(p[0], p[1], p[2] >= 0 ? rad : rad * 0.75, v[2], p[2] >= 0 ? 0.95 : 0.35, sk);
     // 旗（群衆の平均）
     const r = vecs.reduce((a, v) => [a[0] + v[0], a[1] + v[1], a[2] + v[2]], [0, 0, 0]).map((x) => x / vecs.length);
     const o = proj([0, 0, 0], cx, cy, R, dim, 0), e = proj(r, cx, cy, R, dim, 0);
-    if (dim === 1) { o[0] -= R * 0.62; e[0] -= R * 0.62; }   // 1D は数直線の左に旗を立てる
+    if (dim === 1) { o[0] -= R * 0.62; e[0] -= R * 0.62; }
     line(o[0], o[1], e[0], e[1], '#f2f2f5', 3);
     ctx.fillStyle = '#f2f2f5'; ctx.beginPath(); ctx.arc(e[0], e[1], 5, 0, Math.PI * 2); ctx.fill();
     if (dim === 1) label('平均', o[0], cy + R + 16, 0.7);
@@ -222,6 +262,12 @@
   }
   const ZONE_COLOR = { precess: 'rgba(127,119,221,0.35)', dephase: 'rgba(216,90,48,0.35)', damp: 'rgba(55,138,221,0.35)', bitflip: 'rgba(212,83,126,0.35)' };
   const ZONE_NAME = { precess: '磁場', dephase: '位相ノイズ', damp: '減衰', bitflip: 'ビット反転' };
+  function gateStyle(key) {
+    if (key === 'ADD10' || key === 'CLONE') return ['rgba(24,95,165,0.6)', 'rgba(133,183,235,0.95)'];
+    if (key === 'SUB10') return ['rgba(163,45,45,0.6)', 'rgba(240,149,149,0.95)'];
+    if (key === 'M' || key === 'I') return ['rgba(186,117,23,0.55)', 'rgba(239,159,39,0.95)'];
+    return ['rgba(29,158,117,0.55)', 'rgba(93,202,165,0.95)'];
+  }
   function quad(p1, p2, p3, p4, col) {
     ctx.fillStyle = col; ctx.beginPath();
     ctx.moveTo(p1[0], p1[1]); ctx.lineTo(p2[0], p2[1]); ctx.lineTo(p3[0], p3[1]); ctx.lineTo(p4[0], p4[1]); ctx.closePath(); ctx.fill();
@@ -248,11 +294,8 @@
       for (const side of [-1, 1]) {
         const key = side < 0 ? gt.left : gt.right;
         const l = roadPt(dist, side < 0 ? -0.95 : 0.05, g), r = roadPt(dist, side < 0 ? -0.05 : 0.95, g);
-        const h = 70 * l[2];
-        const special = key === 'M' || key === 'I';
-        ctx.fillStyle = special ? 'rgba(186,117,23,0.55)' : 'rgba(29,158,117,0.55)';
-        ctx.strokeStyle = special ? 'rgba(239,159,39,0.95)' : 'rgba(93,202,165,0.95)';
-        ctx.lineWidth = 2;
+        const h = 70 * l[2], [fill, stroke] = gateStyle(key);
+        ctx.fillStyle = fill; ctx.strokeStyle = stroke; ctx.lineWidth = 2;
         ctx.fillRect(l[0], l[1] - h, r[0] - l[0], h); ctx.strokeRect(l[0], l[1] - h, r[0] - l[0], h);
         ctx.fillStyle = '#fff'; ctx.font = font(Math.max(10, 28 * l[2]));
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -267,13 +310,20 @@
       ctx.fillStyle = '#412402'; ctx.font = font(Math.max(10, 20 * p[2]));
       ctx.textAlign = 'center'; ctx.fillText(lv.boss.label, p[0], p[1] - sz * 0.6);
     }
-    const vecs = G.crowd.map(Q.bloch);
-    for (let k = 0; k < G.crowd.length; k++) {
-      const [ox, oy] = G.offsets[k];
-      const p = roadPt(1.2 + oy * 8, G.laneX * 0.5 + ox, g);
-      ctx.fillStyle = zColor(vecs[k][2], 0.95);
-      ctx.beginPath(); ctx.arc(p[0], p[1] - 4, 3.5, 0, Math.PI * 2); ctx.fill();
+    // 群衆（人数に応じて隊列の幅と奥行きを決める）
+    const n = G.crowd.length, cols = Math.max(10, Math.min(24, Math.ceil(Math.sqrt(n * 1.6))));
+    const dx = 0.9 / cols, rows = Math.ceil(n / cols), dy = Math.min(0.07, 0.9 / rows), sk = skin();
+    const rad = n > 200 ? 2.5 : 3.5;
+    let topY = Infinity, cxCrowd = 0;
+    for (let k = 0; k < n; k++) {
+      const p = G.crowd[k], col = k % cols, row = Math.floor(k / cols);
+      const ox = (col - (cols - 1) / 2) * dx + p.j * dx * 0.25, oy = row * dy + Math.abs(p.w) * 0.01;
+      const pt = roadPt(1.2 + oy * 8, G.laneX * 0.5 + ox, g);
+      drawPerson(pt[0], pt[1] - 4, rad, p.r[2], 0.95, sk);
+      topY = Math.min(topY, pt[1] - 4); cxCrowd = roadPt(1.2, G.laneX * 0.5, g)[0];
     }
+    ctx.fillStyle = '#fff'; ctx.font = font(15); ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`${n}人`, cxCrowd, topY - 6);
   }
 
   function drawHUD() {
@@ -282,7 +332,9 @@
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     ctx.fillText(lv.name, 14, 12);
     ctx.font = font(12); ctx.fillStyle = 'rgba(220,220,230,0.8)';
-    ctx.fillText(`ボス: ${lv.boss.label} の向きで ${lv.boss.hp} 人以上`, 14, 34);
+    ctx.fillText(`ボス ${lv.boss.label}：必要ダメージ ${lv.boss.hp}（当たり − はずれ）`, 14, 34);
+    ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(250,199,117,0.95)';
+    ctx.fillText(`${SAVE.ket} ケット`, W - 14, 14);
     ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(14, 54, W - 28, 4);
     ctx.fillStyle = 'rgba(239,159,39,0.9)'; ctx.fillRect(14, 54, (W - 28) * G.s / lv.length, 4);
   }
@@ -295,36 +347,68 @@
     if (ln) ctx.fillText(ln, x, y);
     return y + lh;
   }
-  function button(text, x, y, w, h, fn, primary) {
-    ctx.fillStyle = primary ? 'rgba(29,158,117,0.9)' : 'rgba(255,255,255,0.12)';
+  function button(text, x, y, w, h, fn, style) {
+    ctx.fillStyle = style === 'primary' ? 'rgba(29,158,117,0.9)' : style === 'off' ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.12)';
     ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = '#fff'; ctx.font = font(14); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = style === 'off' ? 'rgba(255,255,255,0.35)' : '#fff';
+    ctx.font = font(14); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(text, x + w / 2, y + h / 2);
-    buttons.push({ x, y, w, h, fn });
+    buttons.push({ x, y, w, h, fn: style === 'off' ? null : fn });
   }
 
   function drawTitle() {
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = font(24); ctx.fillText('量子ビット群衆ランナー', W / 2, 28);
+    ctx.font = font(24); ctx.fillText('量子ビット群衆ランナー', W / 2, 24);
     ctx.font = font(12); ctx.fillStyle = 'rgba(220,220,230,0.8)';
-    wrapText('60 人の群衆を左右のレーンで導き、最後にボスの向きで観測されます。←→ キーか画面の左右タップでレーン変更。', W / 2, 64, Math.min(W - 40, 420), 17);
+    wrapText('群衆を左右のレーンで導き、最後にボスの向きで観測されます。←→ キーか画面の左右タップでレーン変更。', W / 2, 58, Math.min(W - 40, 420), 17);
+    const bwTop = 130;
+    ctx.fillStyle = 'rgba(250,199,117,0.95)'; ctx.font = font(14); ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(`${SAVE.ket} ケット`, Math.max(20, W / 2 - 160), 106);
+    button('ショップ', Math.min(W - bwTop - 20, W / 2 + 30), 92, bwTop, 30, () => { G.mode = 'shop'; });
     const twoCol = W >= 640;
     const bw = twoCol ? Math.min(260, (W - 60) / 3) : Math.min(W - 40, 320);
-    const bh = 34, gap = 6;
+    const bh = 32, gap = 5;
     CHAPTERS.forEach((ch, ci) => {
       const list = LEVELS.map((lv, i) => [lv, i]).filter(([lv]) => lv.ch === ci);
       let x, y;
-      if (twoCol) { x = 30 + ci * (bw + 15); y = 120; } else {
+      if (twoCol) { x = 30 + ci * (bw + 15); y = 136; } else {
         x = (W - bw) / 2;
-        y = 112 + LEVELS.filter((lv) => lv.ch < ci).length * (bh + gap) + ci * 30;
+        y = 134 + LEVELS.filter((lv) => lv.ch < ci).length * (bh + gap) + ci * 26;
       }
       ctx.fillStyle = 'rgba(239,159,39,0.95)'; ctx.font = font(13); ctx.textAlign = 'left'; ctx.textBaseline = 'top';
       ctx.fillText(ch.title, x, y);
       list.forEach(([lv, i], k) => {
-        const done = G.cleared.includes(i) ? '  ✓' : '';
-        button(lv.name + done, x, y + 22 + k * (bh + gap), bw, bh, () => prepareLevel(i), i === firstUncleared());
+        const open = unlocked(i), done = SAVE.cleared.includes(i);
+        const text = lv.name + (done ? '  ✓' : open ? '' : '  （未開放）');
+        button(text, x, y + 20 + k * (bh + gap), bw, bh, () => prepareLevel(i), !open ? 'off' : i === firstUncleared() ? 'primary' : '');
       });
     });
+  }
+
+  function drawShop() {
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = font(22); ctx.fillText('ショップ', W / 2, 24);
+    ctx.fillStyle = 'rgba(250,199,117,0.95)'; ctx.font = font(14);
+    ctx.fillText(`所持 ${SAVE.ket} ケット`, W / 2, 58);
+    ctx.fillStyle = 'rgba(220,220,230,0.8)'; ctx.font = font(12);
+    wrapText(`ケットはクリアで 20、必要ダメージを超えた分 1 につき 2 もらえます。ステージ開始前の画面で ${SKIP_COST} ケット払うとスキップできます。`, W / 2, 82, Math.min(W - 40, 420), 17);
+    const pw = Math.min(W - 32, 420), px = (W - pw) / 2;
+    SKINS.forEach((s, k) => {
+      const y = 140 + k * 62;
+      ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(px, y, pw, 54);
+      for (let m = 0; m < 5; m++) drawPerson(px + 22 + m * 16, y + 27, 5, 1 - m / 2, 1, s);
+      ctx.fillStyle = '#fff'; ctx.font = font(14); ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(s.name, px + 110, y + 27);
+      const owned = SAVE.owned.includes(s.id), using = SAVE.skin === s.id;
+      const bx = px + pw - 112;
+      if (using) button('使用中', bx, y + 11, 100, 32, null, 'off');
+      else if (owned) button('使う', bx, y + 11, 100, 32, () => { SAVE.skin = s.id; save(); }, 'primary');
+      else button(`${s.price} ケット`, bx, y + 11, 100, 32, () => {
+        SAVE.ket -= s.price; SAVE.owned.push(s.id); SAVE.skin = s.id; save();
+        G.toast = { text: `${s.name} を手に入れました`, t: 2 };
+      }, SAVE.ket >= s.price ? 'primary' : 'off');
+    });
+    button('もどる', W / 2 - 60, 140 + SKINS.length * 62 + 10, 120, 36, () => { G.mode = 'title'; });
   }
 
   function drawIntro() {
@@ -332,7 +416,7 @@
     const firstOfChapter = LEVELS.findIndex((l) => l.ch === lv.ch) === G.levelIdx;
     const items = newThings(G.levelIdx);
     const pw = Math.min(W - 24, 460), px = (W - pw) / 2;
-    ctx.fillStyle = 'rgba(12,12,16,0.9)'; ctx.fillRect(px, 66, pw, H * 0.5 - 40);
+    ctx.fillStyle = 'rgba(12,12,16,0.92)'; ctx.fillRect(px, 66, pw, H * 0.5 - 30);
     let y = 80;
     ctx.textAlign = 'left'; ctx.textBaseline = 'top';
     if (firstOfChapter) {
@@ -351,23 +435,29 @@
         y = wrapText(it.text, px + 80, y, pw - 94, 16);
       }
     }
-    const bw = 120;
-    button('スタート', W / 2 - bw - 5, H * 0.5 - 18, bw, 36, () => { G.mode = 'run'; }, true);
-    button('もどる', W / 2 + 5, H * 0.5 - 18, bw, 36, () => { G.mode = 'title'; }, false);
+    const by = H * 0.5 - 8, bw = Math.min(110, (pw - 40) / 3), x0 = W / 2 - (bw * 3 + 20) / 2;
+    button('スタート', x0, by, bw, 34, () => { G.mode = 'run'; }, 'primary');
+    const canSkip = !SAVE.cleared.includes(G.levelIdx) && SAVE.ket >= SKIP_COST;
+    button(`スキップ ${SKIP_COST}`, x0 + bw + 10, by, bw, 34, skipLevel, canSkip ? '' : 'off');
+    button('もどる', x0 + 2 * (bw + 10), by, bw, 34, () => { G.mode = 'title'; });
   }
 
   function drawResult() {
     const lv = G.level, r = G.result;
-    ctx.fillStyle = 'rgba(10,10,14,0.78)'; ctx.fillRect(0, H * 0.16, W, H * 0.34);
+    ctx.fillStyle = 'rgba(10,10,14,0.82)'; ctx.fillRect(0, H * 0.13, W, H * 0.38);
     ctx.fillStyle = r.win ? '#5DCAA5' : '#F0997B'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-    ctx.font = font(28); ctx.fillText(r.win ? 'クリア！' : 'ざんねん…', W / 2, H * 0.18);
+    ctx.font = font(28); ctx.fillText(r.win ? 'クリア！' : 'ざんねん…', W / 2, H * 0.14);
     ctx.fillStyle = '#fff'; ctx.font = font(14);
-    ctx.fillText(`${lv.boss.label} に出た人数  ${G.hits} / ${N}（必要 ${lv.boss.hp}）`, W / 2, H * 0.18 + 44);
-    ctx.fillText(`そろい度 ${(Math.hypot(...G.rBefore) * 100).toFixed(0)}%   スコア ${r.score}`, W / 2, H * 0.18 + 68);
-    const bw = Math.min(130, (W - 50) / 3), gap = 10, bx = (W - (bw * 3 + gap * 2)) / 2, by = H * 0.18 + 100;
-    button('もう一度', bx, by, bw, 38, () => prepareLevel(G.levelIdx), !r.win);
-    button('次へ', bx + bw + gap, by, bw, 38, () => prepareLevel(Math.min(LEVELS.length - 1, G.levelIdx + 1)), r.win);
-    button('タイトル', bx + 2 * (bw + gap), by, bw, 38, () => { G.mode = 'title'; }, false);
+    const miss = G.outcomes.length - G.hits;
+    ctx.fillText(`当たり ${G.hits} − はずれ ${miss} = ダメージ ${G.dmg}（必要 ${lv.boss.hp}）`, W / 2, H * 0.14 + 42);
+    ctx.fillText(`スコア ${r.score}${r.newBest ? '（自己ベスト）' : ''}`, W / 2, H * 0.14 + 64);
+    ctx.fillStyle = 'rgba(250,199,117,0.95)';
+    ctx.fillText(r.ket ? `+${r.ket} ケット（所持 ${SAVE.ket}）` : `所持 ${SAVE.ket} ケット`, W / 2, H * 0.14 + 86);
+    const bw = Math.min(120, (W - 50) / 3), gap = 10, bx = (W - (bw * 3 + gap * 2)) / 2, by = H * 0.14 + 116;
+    button('もう一度', bx, by, bw, 38, () => prepareLevel(G.levelIdx), r.win ? '' : 'primary');
+    const next = Math.min(LEVELS.length - 1, G.levelIdx + 1);
+    button('次へ', bx + bw + gap, by, bw, 38, () => prepareLevel(next), unlocked(next) ? (r.win ? 'primary' : '') : 'off');
+    button('タイトル', bx + 2 * (bw + gap), by, bw, 38, () => { G.mode = 'title'; });
   }
 
   function measureVecs() {
@@ -377,7 +467,6 @@
       const tgt = G.outcomes[i] ? u : u.map((x) => -x);
       const w = [0, 1, 2].map((k) => v[k] + (tgt[k] - v[k]) * e);
       const l = Math.hypot(...w);
-      // 円・球では弧に沿って動かす（長さは元の長さから 1 へ）。1D は直線上をそのまま動かす
       if (l < 1e-6) return tgt;
       if (G.level.dim === 1) return w;
       const L = Math.hypot(...v) * (1 - e) + e;
@@ -385,33 +474,53 @@
     });
   }
 
+  function drawToast() {
+    if (!G.toast) return;
+    ctx.globalAlpha = Math.min(1, G.toast.t);
+    ctx.fillStyle = 'rgba(29,158,117,0.95)';
+    ctx.font = font(13); const w = ctx.measureText(G.toast.text).width + 28;
+    ctx.fillRect((W - w) / 2, H - 70, w, 32);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(G.toast.text, W / 2, H - 54);
+    ctx.globalAlpha = 1;
+  }
+
   function draw() {
     buttons = [];
     ctx.fillStyle = '#16161c'; ctx.fillRect(0, 0, W, H);
-    if (G.mode === 'title') { drawTitle(); return; }
+    if (G.mode === 'title') { drawTitle(); drawToast(); return; }
+    if (G.mode === 'shop') { drawShop(); drawToast(); return; }
     drawRoad();
     drawHUD();
     const R = Math.min(W * 0.34, H * 0.19);
     const vecs = G.mode === 'measure' || G.mode === 'result' ? measureVecs() : G.crowd.map(Q.bloch);
-    const r = drawState(W / 2, H * 0.5 + R + 44, R, vecs);
+    const cyState = H * 0.5 + R + 44;
+    const r = drawState(W / 2, cyState, R, vecs);
+    // ボスの向きに当たる確率と期待ダメージ
+    if (G.mode === 'run' || G.mode === 'intro') {
+      const u = Q.unit(G.level.boss.axis), p = (1 + r[0] * u[0] + r[1] * u[1] + r[2] * u[2]) / 2;
+      const expD = Math.round(Q.expectedDamage(G.crowd, G.level.boss.axis));
+      label(`当たる確率 ${Math.round(p * 100)}%`, 14, H * 0.5 + 16, 0.85, 'left');
+      label(`期待ダメージ ${expD} / ${G.level.boss.hp}`, 14, H * 0.5 + 34, 0.85, 'left');
+    }
     const len = Math.hypot(...r);
-    ctx.fillStyle = 'rgba(220,220,230,0.8)'; ctx.font = font(12); ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText('そろい度', 14, H - 22);
+    label('そろい度', 14, H - 22, 0.8, 'left');
     ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(70, H - 27, W - 90, 10);
     ctx.fillStyle = '#5DCAA5'; ctx.fillRect(70, H - 27, (W - 90) * Math.min(1, len), 10);
     if (G.mode === 'measure') {
-      const shown = Math.min(G.hits, Math.floor(G.hits * Math.max(0, G.measureT - 1.2) / 0.8));
-      ctx.fillStyle = '#EF9F27'; ctx.font = font(30); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(`観測！  ${shown}`, W / 2, H * 0.3);
+      const f = Math.max(0, Math.min(1, (G.measureT - 1.2) / 0.9));
+      ctx.fillStyle = '#EF9F27'; ctx.font = font(28); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(`観測！  ダメージ ${Math.round(G.dmg * f)}`, W / 2, H * 0.2);
     }
     if (G.flash) {
       ctx.globalAlpha = Math.min(1, G.flash.t / 0.4);
-      ctx.fillStyle = '#fff'; ctx.font = font(34); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(G.flash.label, W / 2, H * 0.3);
+      ctx.fillStyle = '#fff'; ctx.font = font(30); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(G.flash.label, W / 2, H * 0.2);
       ctx.globalAlpha = 1;
     }
     if (G.mode === 'intro') drawIntro();
     if (G.mode === 'result') drawResult();
+    drawToast();
   }
 
   let last = performance.now();

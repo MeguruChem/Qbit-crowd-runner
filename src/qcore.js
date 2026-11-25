@@ -49,17 +49,22 @@
     T: { label: 'T', axis: [0, 0, 1], angle: PI / 4 },
     Rx90: { label: 'Rx 90°', axis: [1, 0, 0], angle: PI / 2 },
     M: { label: '観測', special: 'measureZ' },
+    ADD10: { label: '+10人', special: 'add', n: 10 },
+    SUB10: { label: '−10人', special: 'sub', n: 10 },
+    CLONE: { label: '×2', special: 'clone' },
   };
+  const MAX_CROWD = 600;
 
   // ---- 群衆 ----
+  // w: 歳差速度のばらつき（人ごとに固定）、j: 表示用の横ゆらし
+  function makePerson(r) { return { r: r.slice(), w: gauss(), j: 2 * rand() - 1 }; }
   function makeCrowd(N, start) {
     const crowd = [];
     for (let i = 0; i < N; i++) {
       let r = [0, 0, 1];
       if (start === 'one') r = [0, 0, -1];
       else if (start === 'mixed') r = [0, 0, 2 * rand() - 1];
-      // w: 歳差速度のばらつき（人ごとに固定）、j: 1 次元表示での横ゆらし
-      crowd.push({ r, w: gauss(), j: 2 * rand() - 1 });
+      crowd.push(makePerson(r));
     }
     return crowd;
   }
@@ -76,6 +81,28 @@
     const g = GATES[key];
     if (!g) throw new Error('unknown gate ' + key);
     if (g.special === 'measureZ') { crowd.forEach(measureZ); return; }
+    if (g.special === 'add') {
+      // 新しい量子ビットを |0⟩ で用意して合流
+      for (let i = 0; i < g.n && crowd.length < MAX_CROWD; i++) crowd.push(makePerson([0, 0, 1]));
+      return;
+    }
+    if (g.special === 'sub') {
+      // 量子ビットの消失：ランダムに n 人が抜ける（最低 1 人は残る）
+      for (let i = 0; i < g.n && crowd.length > 1; i++) crowd.splice(Math.floor(rand() * crowd.length), 1);
+      return;
+    }
+    if (g.special === 'clone') {
+      // CNOT コピー：|0⟩ の新人を標的に CNOT。縦（z）成分だけが写り、
+      // 本人・コピーともに横成分は消える（複製不可能定理）。
+      // 本来は本人とコピーの測定結果が z で完全相関するが、期待値は変わらないので独立に扱う。
+      const n0 = crowd.length;
+      for (let i = 0; i < n0 && crowd.length < MAX_CROWD; i++) {
+        const p = crowd[i];
+        p.r = [0, 0, p.r[2]];
+        crowd.push(makePerson(p.r));
+      }
+      return;
+    }
     if (!g.axis) return;
     for (const p of crowd) p.r = rotate(p.r, g.axis, g.angle);
   }
@@ -113,19 +140,24 @@
     const u = unit(n);
     return crowd.map((p) => rand() < (1 + p.r[0] * u[0] + p.r[1] * u[1] + p.r[2] * u[2]) / 2);
   }
-  function expectedHits(crowd, n) {
-    const r = meanBloch(crowd), u = unit(n);
-    return crowd.length * (1 + r[0] * u[0] + r[1] * u[1] + r[2] * u[2]) / 2;
+  // ダメージ = 当たり − はずれ = Σ_i σ_n の測定値。期待値は Σ_i r_i·n
+  function expectedDamage(crowd, n) {
+    const u = unit(n);
+    return crowd.reduce((a, p) => a + p.r[0] * u[0] + p.r[1] * u[1] + p.r[2] * u[2], 0);
   }
-  function score(hits, rMean, n) {
+  function damage(outcomes) { return outcomes.reduce((a, o) => a + (o ? 1 : -1), 0); }
+  // スコア = ダメージ × 100 + そろい度ボーナス（向きの合い具合 0〜1000）
+  function score(dmg, rMean, n) {
     const u = unit(n);
     const f = (1 + rMean[0] * u[0] + rMean[1] * u[1] + rMean[2] * u[2]) / 2;
-    return hits * 100 + Math.round(1000 * f);
+    return Math.max(0, dmg) * 100 + Math.round(1000 * f);
   }
+  // 通貨（ケット）：クリアで 20、必要ダメージを超えた分 1 につき 2
+  function ketReward(dmg, hp) { return dmg >= hp ? 20 + 2 * (dmg - hp) : 0; }
 
   const Q = {
-    setSeed, gauss, rotate, GATES, makeCrowd, bloch, meanBloch,
-    applyGate, applyZone, measureAlong, expectedHits, score, unit,
+    setSeed, gauss, rotate, GATES, MAX_CROWD, makePerson, makeCrowd, bloch, meanBloch,
+    applyGate, applyZone, measureAlong, expectedDamage, damage, score, ketReward, unit,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = Q;
   root.Q = Q;
